@@ -1,0 +1,19 @@
+# KeilC build files and folders
+Objects/
+Listings/
+DebugConfig/
+*.o
+*.d
+*.crf
+*.htm
+*.dep
+*.lnp
+*.map
+*.axf
+*.hex
+*.bin
+
+# KeilC user specific files
+*.uvguix.*
+*.uvoptx
+*.scvd

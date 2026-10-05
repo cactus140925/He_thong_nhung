@@ -22,7 +22,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-
+#include <string.h>
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,6 +94,15 @@ uint8_t UserRxBufferFS[APP_RX_DATA_SIZE];
 uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
+
+#define CDC_RX_RING_SIZE 256
+
+static uint8_t cdc_rx_ring[CDC_RX_RING_SIZE];
+
+static volatile uint16_t cdc_rx_head = 0;
+static volatile uint16_t cdc_rx_tail = 0;
+
+volatile uint8_t cdc_rx_overflow = 0;
 
 /* USER CODE END PRIVATE_VARIABLES */
 
@@ -259,9 +268,36 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
+
+  uint32_t i;
+
+  for (i = 0; i < *Len; i++)
+  {
+    uint16_t next =
+        (uint16_t)((cdc_rx_head + 1) % CDC_RX_RING_SIZE);
+
+    if (next != cdc_rx_tail)
+    {
+      cdc_rx_ring[cdc_rx_head] = Buf[i];
+      cdc_rx_head = next;
+    }
+    else
+    {
+      /* RX buffer full */
+      cdc_rx_overflow = 1;
+      break;
+    }
+  }
+
+  /*
+   * Re-arm USB OUT endpoint
+   * d? ti?p t?c nh?n d? li?u t? PC.
+   */
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  return (USBD_OK);
+
+  return USBD_OK;
+
   /* USER CODE END 6 */
 }
 
@@ -279,18 +315,67 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
+
   /* USER CODE BEGIN 7 */
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
-  if (hcdc->TxState != 0){
-    return USBD_BUSY;
+
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
+  {
+      return USBD_FAIL;
   }
-  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
-  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+
+  if (hUsbDeviceFS.pClassData == NULL)
+  {
+      return USBD_FAIL;
+  }
+
+  USBD_CDC_HandleTypeDef *hcdc =
+      (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+
+  if (hcdc->TxState != 0)
+  {
+      return USBD_BUSY;
+  }
+
+  USBD_CDC_SetTxBuffer(
+      &hUsbDeviceFS,
+      Buf,
+      Len
+  );
+
+  result =
+      USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+
   /* USER CODE END 7 */
+
   return result;
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+
+uint16_t USB_CDC_Read(uint8_t *buffer, uint16_t max_len)
+{
+    uint16_t count = 0;
+
+    while ((cdc_rx_tail != cdc_rx_head) &&
+           (count < max_len))
+    {
+        buffer[count++] = cdc_rx_ring[cdc_rx_tail];
+
+        cdc_rx_tail =
+            (uint16_t)((cdc_rx_tail + 1) % CDC_RX_RING_SIZE);
+    }
+
+    return count;
+}
+
+uint8_t USB_CDC_RxOverflow(void)
+{
+    uint8_t state = cdc_rx_overflow;
+
+    cdc_rx_overflow = 0;
+
+    return state;
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 

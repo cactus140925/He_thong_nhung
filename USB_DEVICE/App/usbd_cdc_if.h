@@ -110,6 +110,13 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
 
+uint16_t USB_CDC_Read(
+    uint8_t *buffer,
+    uint16_t max_len
+);
+
+uint8_t USB_CDC_RxOverflow(void);
+
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

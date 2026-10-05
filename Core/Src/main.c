@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usb_cdc_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -89,7 +89,11 @@ int main(void)
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+  USB_CDC_App_Init();
 
+HAL_Delay(1000);
+
+USB_CDC_SendString("STM32_TRNG_READY\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -99,6 +103,22 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    CDC_Event_t event;
+
+    USB_CDC_App_Task();
+
+    event = USB_CDC_GetEvent();
+if (event == CDC_EVENT_START)
+    {
+            }
+    else if (event == CDC_EVENT_STOP)
+    {
+           }
+    else if (event == CDC_EVENT_GET_RANDOM)
+    {
+        USB_CDC_SendString(
+            "ERROR:TRNG_NOT_IMPLEMENTED\r\n"
+        );
   }
   /* USER CODE END 3 */
 }

@@ -4,6 +4,10 @@
 #include "stm32f103xb.h"
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * ============================================================================
  * UART1 DRIVER - CMSIS REGISTER + DMA + INTERRUPT
@@ -34,18 +38,53 @@
  * ============================================================================
  */
 
-#define UART1_RX_DMA_BUFFER_SIZE    256u
-#define UART1_TX_BUFFER_SIZE        256u
-
-#if ((UART1_RX_DMA_BUFFER_SIZE < 2u) || ((UART1_RX_DMA_BUFFER_SIZE % 2u) != 0u))
-#error "UART1_RX_DMA_BUFFER_SIZE must be an even number >= 2"
+#ifndef UART1_RX_DMA_BUFFER_SIZE
+#define UART1_RX_DMA_BUFFER_SIZE    256U
 #endif
 
-#if (UART1_TX_BUFFER_SIZE < 2u)
-#error "UART1_TX_BUFFER_SIZE must be >= 2"
+#ifndef UART1_TX_BUFFER_SIZE
+#define UART1_TX_BUFFER_SIZE        256U
 #endif
 
+#ifndef UART1_IRQ_PRIORITY
+#define UART1_IRQ_PRIORITY          6U
+#endif
 
+/*
+ * RX DMA buffer:
+ *
+ *   - toi thieu 2 byte
+ *   - toi da 65535 byte
+ *   - bat buoc la so chan
+ */
+#if ((UART1_RX_DMA_BUFFER_SIZE < 2U) || \
+     (UART1_RX_DMA_BUFFER_SIZE > 65535U) || \
+     ((UART1_RX_DMA_BUFFER_SIZE % 2U) != 0U))
+#error "UART1_RX_DMA_BUFFER_SIZE must be even and in range 2..65535"
+#endif
+
+/*
+ * TX queue dung uint16_t lam chi so,
+ * vi vay kich thuoc khong duoc vuot qua 65535.
+ */
+#if ((UART1_TX_BUFFER_SIZE < 2U) || \
+     (UART1_TX_BUFFER_SIZE > 65535U))
+#error "UART1_TX_BUFFER_SIZE must be in range 2..65535"
+#endif
+
+/*
+ * Kiem tra IRQ priority hop le voi NVIC.
+ * STM32F103: __NVIC_PRIO_BITS = 4
+ * Tuong ung priority hop le: 0 ... 15
+ */
+#if (UART1_IRQ_PRIORITY >= (1U << __NVIC_PRIO_BITS))
+#error "UART1_IRQ_PRIORITY is outside the valid NVIC priority range"
+#endif
+
+/* ============================================================================
+ * TRANG THAI DRIVER
+ * ============================================================================
+ */
 typedef enum
 {
     UART1_OK = 0,
@@ -76,9 +115,9 @@ typedef enum
 
 } UART1_Status_t;
 
-
-/*
- * Bitmask chan doan chi tiet loi USART.
+/* ============================================================================
+ * CO LOI PHAN CUNG USART
+ * ============================================================================
  */
 #define UART1_HWERR_NONE    0x00000000u
 #define UART1_HWERR_PE      0x00000001u
@@ -86,13 +125,10 @@ typedef enum
 #define UART1_HWERR_NE      0x00000004u
 #define UART1_HWERR_ORE     0x00000008u
 
-
-/*
+/* ============================================================================
+ * API
+ * ============================================================================
  * Khoi tao UART1 + DMA + NVIC.
- *
- * Yeu cau:
- *   SystemClock_Config() da chay truoc ham nay.
- *
  * Driver tu:
  *   - cau hinh PA9/PA10,
  *   - tinh PCLK2 va BRR,
@@ -101,7 +137,6 @@ typedef enum
  *   - bat cac IRQ can thiet.
  */
 UART1_Status_t UART1_Init(uint32_t baudrate);
-
 
 /*
  * Ghi TOAN BO block vao TX circular queue.
@@ -118,10 +153,8 @@ UART1_Status_t UART1_Write(
     uint16_t length
 );
 
-
 /*
- * Lay toi da capacity byte moi tu RX DMA Circular.
- *
+ * Doc du lieu moi tu RX DMA Circular.
  * Non-blocking:
  *   0  -> chua co du lieu moi
  *   >0 -> so byte thuc te da copy vao dst
@@ -131,70 +164,48 @@ uint16_t UART1_Read(
     uint16_t capacity
 );
 
-
-/*
+/* Kiem tra TX da hoan tat tren duong truyen hay chua.
  * Tra 1 khi:
  *   - TX queue rong
  *   - DMA TX khong active
  *   - USART1 TC = 1
- *
  * Tuc byte cuoi da ra het chan PA9.
  */
 uint8_t UART1_IsTxIdle(void);
-
 
 /*
  * Lay trang thai/loi sticky hien tai.
  */
 UART1_Status_t UART1_GetStatus(void);
 
-
 /*
- * Xoa status va bitmask loi sau khi main da ghi nhan.
- *
+ * Xoa sticky status va hardware error flags.
  * Khong xoa RX data/TX data hop le dang con trong driver.
  */
 void UART1_ClearStatus(void);
 
-
 /*
- * Lay bitmask PE/FE/NE/ORE.
+ * Lay bitmask PE/FE/NE/ORE loi phan cung USART1. 
  */
 uint32_t UART1_GetHwErrorFlags(void);
 
-
-/*
- * Logic IRQ cua module.
- *
- * stm32f1xx_it.c can co:
- *
- * void DMA1_Channel4_IRQHandler(void)
- * {
- *     UART1_DMA_TX_IRQHandler();
- * }
- *
- * void DMA1_Channel5_IRQHandler(void)
- * {
- *     UART1_DMA_RX_IRQHandler();
- * }
- *
- * void USART1_IRQHandler(void)
- * {
- *     UART1_IRQHandler();
- * }
- */
+/* ============================================================================
+ * 6. CAC HAM XU LY NGAT
+ * ============================================================================
+*/
 void UART1_DMA_TX_IRQHandler(void);
 void UART1_DMA_RX_IRQHandler(void);
 void UART1_IRQHandler(void);
 
-
-/*
- * Weak callback.
- *
- * Application co the override trong main.c.
+/* ============================================================================
+ * 7. CALLBACK
+ * ============================================================================
  */
 void UART1_TxCompleteCallback(void);
 void UART1_ErrorCallback(UART1_Status_t error);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* UART_H */

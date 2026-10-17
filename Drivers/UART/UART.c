@@ -1,49 +1,33 @@
 #include "UART.h"
 
+#ifndef UART1_CLEAR_DMA_FLAGS
+#define UART1_CLEAR_DMA_FLAGS(flags)    (DMA1->IFCR = (flags))
+#endif
 /*
  * ============================================================================
  * UART1 DRIVER - CMSIS REGISTER + DMA + INTERRUPT
- * ============================================================================
- *
- * TX:
- *   Main -> UART1_Write()
- *        -> TX circular queue
- *        -> DMA1 Channel 4
- *        -> USART1->DR
- *        -> PA9
- *
- * RX:
- *   PA10 -> USART1->DR
- *        -> DMA1 Channel 5 Circular
- *        -> RX DMA buffer
- *        -> UART1_Read()
- *        -> Main
- *
- * DMA chuyen du lieu.
- * Interrupt chi bao moc hoan tat / loi / TC cua USART.
  * ============================================================================
  */
 
 
 /* ============================================================================
- * 1. BUFFER NOI BO
+ * BUFFER NOI BO
  * ============================================================================
  */
 
-/* DMA1 Channel 5 ghi truc tiep vao buffer RX nay. */
-static uint8_t uart1_rx_dma_buffer[UART1_RX_DMA_BUFFER_SIZE];
+/* DMA1 Channel 5 ghi truc tiep vao buffer RX 
+ * volatile: CPU luon doc lai gia tri RAM moi nhat do DMA cap nhat.
+ */
+static volatile uint8_t uart1_rx_dma_buffer[UART1_RX_DMA_BUFFER_SIZE];
 
-/*
- * TX circular queue.
- *
+/* TX circular queue.
  * main ghi tai tx_head.
  * DMA doc tu tx_tail.
  */
 static uint8_t uart1_tx_buffer[UART1_TX_BUFFER_SIZE];
 
-
 /* ============================================================================
- * 2. TRANG THAI TX
+ * TRANG THAI TX
  * ============================================================================
  */
 
@@ -59,15 +43,10 @@ static volatile uint16_t uart1_tx_dma_chunk_len = 0u;
 /* =1 khi queue rong va dang cho USART TC. */
 static volatile uint8_t uart1_tx_waiting_tc = 0u;
 
-
 /* ============================================================================
- * 3. TRANG THAI RX DMA
+ * TRANG THAI RX DMA
  * ============================================================================
- */
-
-/*
  * Tong so byte da di qua cac moc HT/TC cua DMA RX.
- *
  * Buffer 256 byte:
  *   HT -> +128
  *   TC -> +128
@@ -77,9 +56,8 @@ static volatile uint32_t uart1_rx_completed_bytes = 0u;
 /* Tong so byte UART1_Read() da tra cho main. */
 static uint32_t uart1_rx_read_total = 0u;
 
-
 /* ============================================================================
- * 4. TRANG THAI CHUNG
+ * TRANG THAI CHUNG
  * ============================================================================
  */
 
@@ -91,28 +69,23 @@ static volatile UART1_Status_t uart1_status =
 static volatile uint32_t uart1_hw_error_flags =
     UART1_HWERR_NONE;
 
-
 /* ============================================================================
- * 5. HAM NOI BO - TX QUEUE
+ * HAM NOI BO - TX QUEUE
  * ============================================================================
  */
 
 static uint16_t UART1_TxNextIndex(uint16_t index)
 {
     index++;
-
     if (index >= UART1_TX_BUFFER_SIZE)
     {
         index = 0u;
     }
-
     return index;
 }
 
-
 /*
  * Tinh so byte trong cua TX queue.
- *
  * Queue de trong 1 o de phan biet rong/day.
  */
 static uint16_t UART1_TxFreeSpace(void)
@@ -130,58 +103,62 @@ static uint16_t UART1_TxFreeSpace(void)
     }
     else
     {
-        used = (uint16_t)(
-            UART1_TX_BUFFER_SIZE - (tail - head)
-        );
+        used = (uint16_t)(UART1_TX_BUFFER_SIZE - (tail - head));
     }
-
-    return (uint16_t)(
-        UART1_TX_BUFFER_SIZE - 1u - used
-    );
+    return (uint16_t)(UART1_TX_BUFFER_SIZE - 1u - used);
 }
 
-
 /* ============================================================================
- * 6. GPIO + CLOCK
+ * GPIO + CLOCK
  * ============================================================================
+ * Cau hinh GPIO cho USART1 mapping mac dinh:
+ *   PA9  = TX, PA10 = RX
+ * Khi cap nhat AFIO->MAPR, driver xoa USART1_REMAP de dua USART1
+ * ve PA9/PA10 va dat SWJ_CFG = JTAGDISABLE de van giu SWD tren PA13/PA14.
+ * Cac bit remap khac duoc giu nguyen.
  */
 
-static void UART1_GPIO_Init(void)
+static UART1_Status_t UART1_GPIO_Init(void)
 {
     /* Bat clock AFIO va GPIOA. */
-    RCC->APB2ENR |= RCC_APB2ENR_AFIOEN
-                  | RCC_APB2ENR_IOPAEN;
+    RCC->APB2ENR |= RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPAEN;
 
+    (void)RCC->APB2ENR;
     /*
-     * Dam bao USART1 khong remap:
-     * TX = PA9
-     * RX = PA10
+     * Dam bao USART1 dung mapping mac dinh:
+     *   TX = PA9,RX = PA10
+     * SWJ_CFG tren STM32F1 co han che readback, vi vay khi ghi MAPR
+     * can ghi lai chinh sach SWD cua project mot cach ro rang.
+     * JTAG bi tat nhung SWD van duoc giu de debug/nap code.
      */
-    AFIO->MAPR &= ~AFIO_MAPR_USART1_REMAP;
-
-    /*
-     * PA9 = USART1_TX
+    AFIO->MAPR =(AFIO->MAPR &~ 
+				(AFIO_MAPR_USART1_REMAP | AFIO_MAPR_SWJ_CFG))
+        | AFIO_MAPR_SWJ_CFG_JTAGDISABLE;
+	
+    /* PA9 = USART1_TX
      * CNF9  = 10 -> Alternate Function Push-Pull
-     * MODE9 = 11 -> Output 50 MHz
-     * => 0xB
+     * MODE9 = 11 -> Output 50 MHz => 0xB
      */
-    GPIOA->CRH &= ~(0xFu << 4);
-    GPIOA->CRH |=  (0xBu << 4);
+    GPIOA->CRH &= ~(0xFUL << 4U);
+    GPIOA->CRH |=  (0xBUL << 4U);
 
     /*
      * PA10 = USART1_RX
-     * CNF10  = 01 -> Floating Input
-     * MODE10 = 00 -> Input
-     * => 0x4
+     * CNF10  = 10 -> Input pull-up / pull-down
+     * MODE10 = 00 -> Input => 0x8
+     *
+     * ODR10 = 1 -> Pull-up.
+     * UART idle o muc HIGH, pull-up giup RX khong bi floating
+     * khi USB-TTL chua ket noi.
      */
-    GPIOA->CRH &= ~(0xFu << 8);
-    GPIOA->CRH |=  (0x4u << 8);
+    GPIOA->CRH &= ~(0xFUL << 8U);
+    GPIOA->CRH |=  (0x8UL << 8U);
+    GPIOA->ODR |=  (1UL << 10U);
+    return UART1_OK;
 }
-
 
 /*
  * Lay PCLK2 thuc te.
- *
  * USART1 nam tren APB2.
  * SystemClock_Config() phai chay truoc UART1_Init().
  */
@@ -198,17 +175,12 @@ static uint32_t UART1_GetPCLK2Hz(void)
     /* RCC_CFGR PPRE2 = bit [13:11]. */
     ppre2 = (RCC->CFGR >> 11u) & 0x7u;
 
-    return SystemCoreClock /
-           apb_div_table[ppre2];
+    return SystemCoreClock / apb_div_table[ppre2];
 }
 
-
 /* ============================================================================
- * 7. TX DMA - START CHUNK TIEP THEO
+ * TX DMA - START CHUNK TIEP THEO
  * ============================================================================
- *
- * Ham nay chi dung noi bo.
- *
  * Goi:
  *   - khi interrupt dang khoa trong UART1_Write(), hoac
  *   - tu DMA1 Channel 4 ISR.
@@ -231,7 +203,6 @@ static void UART1_TxStartNextDMA(void)
 
     /*
      * Queue rong.
-     *
      * Cho USART TC de xac nhan byte cuoi da ra het PA9.
      */
     if (head == tail)
@@ -241,15 +212,12 @@ static void UART1_TxStartNextDMA(void)
         return;
     }
 
-    /*
-     * Co data moi -> khong cho TC cu nua.
-     */
+     //Co data moi -> khong cho TC cu nua.
     uart1_tx_waiting_tc = 0u;
     USART1->CR1 &= ~USART_CR1_TCIE;
 
     /*
      * DMA chi truyen duoc vung RAM lien tuc.
-     *
      * Neu queue wrap:
      *   truyen tail -> end truoc,
      *   DMA TC se truyen 0 -> head sau.
@@ -265,73 +233,50 @@ static void UART1_TxStartNextDMA(void)
         );
     }
 
-    /* Tat channel truoc khi doi CMAR/CNDTR. */
+    //Tat channel truoc khi doi CMAR/CNDTR. 
     DMA1_Channel4->CCR &= ~DMA_CCR_EN;
 
-    /* Xoa flag cu Channel 4. */
+    // Xoa flag cu Channel 4. */
     DMA1->IFCR = DMA_IFCR_CGIF4;
-
-    DMA1_Channel4->CMAR =
-        (uint32_t)&uart1_tx_buffer[tail];
-
-    DMA1_Channel4->CNDTR =
-        chunk_len;
-
-    uart1_tx_dma_chunk_len =
-        chunk_len;
-
+    DMA1_Channel4->CMAR = (uint32_t)&uart1_tx_buffer[tail];
+    DMA1_Channel4->CNDTR = chunk_len;
+    uart1_tx_dma_chunk_len = chunk_len;
     uart1_tx_dma_active = 1u;
 
-    /* Bat DMA TX. */
+    // Bat DMA TX. 
     DMA1_Channel4->CCR |= DMA_CCR_EN;
 }
 
-
 /* ============================================================================
- * 8. RX DMA - SERVICE HT / TC / TE
+ * RX DMA - SERVICE HT / TC / TE
  * ============================================================================
  */
 
-static void UART1_RxServicePendingFlags(
-    uint8_t call_error_callback
-)
+static void UART1_RxServicePendingFlags (uint8_t call_error_callback)
 {
     uint32_t isr;
-
     isr = DMA1->ISR;
 
-    /*
-     * DMA RX Transfer Error.
-     */
+    // DMA RX Transfer Error.
     if ((isr & DMA_ISR_TEIF5) != 0u)
     {
         /* Clear toan bo flag Channel 5. */
         DMA1->IFCR = DMA_IFCR_CGIF5;
-
         DMA1_Channel5->CCR &= ~DMA_CCR_EN;
-
         uart1_status = UART1_ERROR_DMA_RX;
-
         if (call_error_callback != 0u)
         {
-            UART1_ErrorCallback(
-                UART1_ERROR_DMA_RX
-            );
+            UART1_ErrorCallback(UART1_ERROR_DMA_RX);
         }
 
         return;
     }
-
-    /*
-     * Half Transfer:
-     * DMA da ghi xong nua dau RX buffer.
-     */
+		
+    // Half Transfer: DMA da ghi xong nua dau RX buffer.
     if ((isr & DMA_ISR_HTIF5) != 0u)
     {
         DMA1->IFCR = DMA_IFCR_CHTIF5;
-
-        uart1_rx_completed_bytes +=
-            (UART1_RX_DMA_BUFFER_SIZE / 2u);
+        uart1_rx_completed_bytes += (UART1_RX_DMA_BUFFER_SIZE / 2u);
     }
 
     /*
@@ -342,15 +287,12 @@ static void UART1_RxServicePendingFlags(
     if ((isr & DMA_ISR_TCIF5) != 0u)
     {
         DMA1->IFCR = DMA_IFCR_CTCIF5;
-
-        uart1_rx_completed_bytes +=
-            (UART1_RX_DMA_BUFFER_SIZE / 2u);
+        uart1_rx_completed_bytes += (UART1_RX_DMA_BUFFER_SIZE / 2u);
     }
 }
 
-
 /* ============================================================================
- * 9. INIT
+ * INIT
  * ============================================================================
  */
 
@@ -358,44 +300,76 @@ UART1_Status_t UART1_Init(uint32_t baudrate)
 {
     uint32_t pclk2_hz;
     uint32_t brr;
+    uint64_t wanted_clock;
+    uint64_t baud_error;
     volatile uint32_t dummy;
+    UART1_Status_t gpio_status;
 
-    uart1_initialized = 0u;
-
-    if (baudrate == 0u)
+    /* Baudrate = 0 khong hop le. */
+    if (baudrate == 0U)
     {
         uart1_status = UART1_ERROR_PARAM;
         return UART1_ERROR_PARAM;
     }
 
     /*
-     * Tat IRQ module trong luc cau hinh lai peripheral.
+     * Neu driver da khoi tao va TX van dang chay,
+     * khong reset USART/DMA giua phien truyen.
      */
+    if ((uart1_initialized != 0U) &&
+        (UART1_IsTxIdle() == 0U))
+    {
+        return UART1_BUSY;
+    }
+
+    /*
+     * Tu diem nay co the re-init an toan.
+     * Danh dau chua initialized trong luc cau hinh lai peripheral.
+     */
+    uart1_initialized = 0U;
+
+    /* Tat IRQ module trong luc cau hinh lai peripheral. */
     NVIC_DisableIRQ(DMA1_Channel4_IRQn);
     NVIC_DisableIRQ(DMA1_Channel5_IRQn);
     NVIC_DisableIRQ(USART1_IRQn);
 
-    UART1_GPIO_Init();
+    /* Cau hinh GPIO va kiem tra USART1 khong bi remap. */
+    gpio_status = UART1_GPIO_Init();
+    if (gpio_status != UART1_OK)
+    {
+        uart1_status = gpio_status;
+        return gpio_status;
+    }
 
     /* Bat clock USART1 va DMA1. */
     RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
     RCC->AHBENR  |= RCC_AHBENR_DMA1EN;
+    (void)RCC->APB2ENR;
+    (void)RCC->AHBENR;
 
-    /* Reset USART control register. */
-    USART1->CR1 = 0u;
-    USART1->CR2 = 0u;
-    USART1->CR3 = 0u;
+    /*
+     * Reset USART1 de dua peripheral ve trang thai sach.
+     * Khong anh huong GPIO/SWD.
+     */
+    RCC->APB2RSTR |= RCC_APB2RSTR_USART1RST;
+    RCC->APB2RSTR &= ~RCC_APB2RSTR_USART1RST;
 
     /* Tat DMA channel truoc khi cau hinh. */
     DMA1_Channel4->CCR &= ~DMA_CCR_EN;
     DMA1_Channel5->CCR &= ~DMA_CCR_EN;
 
-    /*
-     * Tinh baudrate tu PCLK2 thuc te.
-     */
-    pclk2_hz = UART1_GetPCLK2Hz();
+    /* Reset USART control registers. */
+    USART1->CR1 = 0U;
+    USART1->CR2 = 0U;
+    USART1->CR3 = 0U;
 
-    if (pclk2_hz == 0u)
+    /*
+     * Cap nhat SystemCoreClock truoc khi tinh PCLK2.
+     */
+    SystemCoreClockUpdate();
+    pclk2_hz = UART1_GetPCLK2Hz();
+    if ((pclk2_hz == 0U) ||
+        (pclk2_hz > 72000000U))
     {
         uart1_status = UART1_ERROR_CLOCK;
         return UART1_ERROR_CLOCK;
@@ -403,180 +377,163 @@ UART1_Status_t UART1_Init(uint32_t baudrate)
 
     /*
      * STM32F1 USART oversampling x16:
-     * BRR xap xi PCLK / baud.
+     * BRR xap xi PCLK2 / baudrate.
+     * Cong baudrate / 2 de lam tron gan nhat.
      */
-    brr = (pclk2_hz + (baudrate / 2u))
-        / baudrate;
-
-    if ((brr < 16u) || (brr > 0xFFFFu))
+    brr = (pclk2_hz + (baudrate / 2U)) / baudrate;
+    if ((brr < 16U) || (brr > 0xFFFFU))
     {
         uart1_status = UART1_ERROR_PARAM;
         return UART1_ERROR_PARAM;
     }
 
+    /*
+     * Kiem tra sai so do lam tron BRR.
+     * Neu sai so lon hon 2%, xem clock/baudrate khong phu hop.
+     */
+    wanted_clock = (uint64_t)baudrate * (uint64_t)brr;
+
+    if ((uint64_t)pclk2_hz >= wanted_clock)
+    {
+        baud_error = (uint64_t)pclk2_hz - wanted_clock;
+    }
+    else
+    {
+        baud_error = wanted_clock - (uint64_t)pclk2_hz;
+    }
+
+    if ((baud_error * 100ULL) > (wanted_clock * 2ULL))
+    {
+        uart1_status = UART1_ERROR_CLOCK;
+        return UART1_ERROR_CLOCK;
+    }
     USART1->BRR = brr;
 
-    /*
-     * ------------------------------------------------------------
+    /*------------------------------------------------------------------------
      * DMA1 Channel 4 - USART1 TX
-     * ------------------------------------------------------------
-     *
+     * ------------------------------------------------------------------------
      * DIR  = 1  : Memory -> Peripheral
      * MINC = 1  : tang dia chi RAM
      * PL   = 01 : Medium priority
      * TCIE = 1  : ngat khi xong chunk
      * TEIE = 1  : ngat khi DMA error
-     *
      * MSIZE/PSIZE = 00 -> 8 bit
      */
-    DMA1_Channel4->CCR = 0u;
-
-    DMA1_Channel4->CPAR =
-        (uint32_t)&USART1->DR;
-
-    DMA1_Channel4->CMAR =
-        (uint32_t)uart1_tx_buffer;
-
-    DMA1_Channel4->CNDTR = 0u;
-
-    DMA1_Channel4->CCR =
-          DMA_CCR_DIR
-        | DMA_CCR_MINC
-        | DMA_CCR_PL_0
-        | DMA_CCR_TCIE
-        | DMA_CCR_TEIE;
-
-    /*
-     * ------------------------------------------------------------
+    DMA1_Channel4->CCR = 0U;
+    DMA1_Channel4->CPAR = (uintptr_t)&USART1->DR;
+    DMA1_Channel4->CMAR = (uintptr_t)uart1_tx_buffer;
+    DMA1_Channel4->CNDTR = 0U;
+    DMA1_Channel4->CCR = DMA_CCR_DIR
+											| DMA_CCR_MINC
+											| DMA_CCR_PL_0
+											| DMA_CCR_TCIE
+											| DMA_CCR_TEIE;
+    /*------------------------------------------------------------------------
      * DMA1 Channel 5 - USART1 RX Circular
-     * ------------------------------------------------------------
-     *
+     * ------------------------------------------------------------------------
      * DIR  = 0  : Peripheral -> Memory
      * MINC = 1
      * CIRC = 1
+     * PL   = 01 : Medium priority
      * HTIE = 1
      * TCIE = 1
      * TEIE = 1
+     * MSIZE/PSIZE = 00 -> 8 bit
      */
-    DMA1_Channel5->CCR = 0u;
+    DMA1_Channel5->CCR = 0U;
+    DMA1_Channel5->CPAR = (uintptr_t)&USART1->DR;
+    DMA1_Channel5->CMAR = (uintptr_t)uart1_rx_dma_buffer;
+    DMA1_Channel5->CNDTR = UART1_RX_DMA_BUFFER_SIZE;
+    DMA1_Channel5->CCR = DMA_CCR_MINC
+											| DMA_CCR_CIRC
+											| DMA_CCR_PL_0
+											| DMA_CCR_HTIE
+											| DMA_CCR_TCIE
+											| DMA_CCR_TEIE;
 
-    DMA1_Channel5->CPAR =
-        (uint32_t)&USART1->DR;
+    /* Xoa cac flag DMA cu cua Channel 4 va Channel 5. */
+    UART1_CLEAR_DMA_FLAGS(DMA_IFCR_CGIF5);
 
-    DMA1_Channel5->CMAR =
-        (uint32_t)uart1_rx_dma_buffer;
-
-    DMA1_Channel5->CNDTR =
-        UART1_RX_DMA_BUFFER_SIZE;
-
-    DMA1_Channel5->CCR =
-          DMA_CCR_MINC
-        | DMA_CCR_CIRC
-        | DMA_CCR_PL_0
-        | DMA_CCR_HTIE
-        | DMA_CCR_TCIE
-        | DMA_CCR_TEIE;
-
-    /*
-     * Xoa flag DMA cu.
+    /* USART CR3:
+     * DMAT = bat DMA request cho TX
+     * DMAR = bat DMA request cho RX
+     * EIE  = bat FE/NE/ORE interrupt
      */
-    DMA1->IFCR =
-          DMA_IFCR_CGIF4
-        | DMA_IFCR_CGIF5;
+    USART1->CR3 = USART_CR3_DMAT
+								| USART_CR3_DMAR
+								| USART_CR3_EIE;
 
-    /*
-     * USART CR3:
-     * DMAT = DMA TX request
-     * DMAR = DMA RX request
-     * EIE  = FE/NE/ORE interrupt
-     */
-    USART1->CR3 =
-          USART_CR3_DMAT
-        | USART_CR3_DMAR
-        | USART_CR3_EIE;
+    /* Reset software state. */
+    uart1_tx_head = 0U;
+    uart1_tx_tail = 0U;
+    uart1_tx_dma_active = 0U;
+    uart1_tx_dma_chunk_len = 0U;
+    uart1_tx_waiting_tc = 0U;
 
-    /*
-     * Reset software state.
-     */
-    uart1_tx_head = 0u;
-    uart1_tx_tail = 0u;
-    uart1_tx_dma_active = 0u;
-    uart1_tx_dma_chunk_len = 0u;
-    uart1_tx_waiting_tc = 0u;
-
-    uart1_rx_completed_bytes = 0u;
-    uart1_rx_read_total = 0u;
+    uart1_rx_completed_bytes = 0U;
+    uart1_rx_read_total = 0U;
 
     uart1_status = UART1_OK;
     uart1_hw_error_flags = UART1_HWERR_NONE;
 
     /*
-     * Don cac co RX/error cu:
-     * STM32F1 clear error bang sequence doc SR -> doc DR.
+     * Don cac co RX/error cu.
+     * STM32F1 clear PE/FE/NE/ORE bang sequence:
+     * doc SR -> doc DR.
      */
     dummy = USART1->SR;
     dummy = USART1->DR;
     (void)dummy;
 
-    /*
-     * USART CR1:
+    /* USART CR1:
      * TE   = transmitter enable
      * RE   = receiver enable
      * PEIE = parity error interrupt
      * UE   = USART enable
-     *
      * M=0, PCE=0 -> 8 data bit, no parity.
      * CR2 STOP=00 -> 1 stop bit.
-     *
-     * Khong bat RXNEIE/TXEIE vi data do DMA xu ly.
+     * KHONG bat RXNEIE/TXEIE vi data do DMA xu ly.
      */
-    USART1->CR1 =
-          USART_CR1_TE
-        | USART_CR1_RE
-        | USART_CR1_PEIE
-        | USART_CR1_UE;
+    USART1->CR1 = USART_CR1_TE
+								| USART_CR1_RE
+								| USART_CR1_PEIE
+								| USART_CR1_UE;
 
-    /*
-     * Bat RX DMA Circular.
+    /* Bat RX DMA Circular.
+     * Tu thoi diem nay USART1 RX se tu dong ghi vao RX buffer.
      */
+    __DMB();
     DMA1_Channel5->CCR |= DMA_CCR_EN;
 
-    /*
-     * Xoa pending NVIC cu.
-     */
+    /* Xoa pending NVIC cu. */
     NVIC_ClearPendingIRQ(DMA1_Channel4_IRQn);
     NVIC_ClearPendingIRQ(DMA1_Channel5_IRQn);
     NVIC_ClearPendingIRQ(USART1_IRQn);
 
-    /*
-     * Dat priority.
-     */
-    NVIC_SetPriority(DMA1_Channel4_IRQn, 2u);
-    NVIC_SetPriority(DMA1_Channel5_IRQn, 2u);
-    NVIC_SetPriority(USART1_IRQn, 2u);
+    /* Dat priority theo cau hinh trong UART.h. */
+    NVIC_SetPriority(DMA1_Channel4_IRQn,UART1_IRQ_PRIORITY);
+    NVIC_SetPriority(DMA1_Channel5_IRQn,UART1_IRQ_PRIORITY);
+    NVIC_SetPriority(USART1_IRQn,UART1_IRQ_PRIORITY);
 
-    /*
-     * Bat IRQ.
+    /* Danh dau module da khoi tao TRUOC khi bat IRQ.
+     * Neu IRQ xay ra ngay sau NVIC_EnableIRQ(), ISR se thay state hop le.
      */
+    uart1_initialized = 1U;
+
+    /* Bat IRQ. */
     NVIC_EnableIRQ(DMA1_Channel4_IRQn);
     NVIC_EnableIRQ(DMA1_Channel5_IRQn);
     NVIC_EnableIRQ(USART1_IRQn);
 
-    uart1_initialized = 1u;
-
     return UART1_OK;
 }
 
-
 /* ============================================================================
- * 10. WRITE
+ * WRITE
  * ============================================================================
  */
 
-UART1_Status_t UART1_Write(
-    const uint8_t *data,
-    uint16_t length
-)
+UART1_Status_t UART1_Write(const uint8_t *data,uint16_t length)
 {
     uint32_t primask;
     uint16_t free_space;
@@ -585,9 +542,7 @@ UART1_Status_t UART1_Write(
 
     if (uart1_initialized == 0u)
     {
-        uart1_status =
-            UART1_ERROR_NOT_INITIALIZED;
-
+        uart1_status = UART1_ERROR_NOT_INITIALIZED;
         return UART1_ERROR_NOT_INITIALIZED;
     }
 
@@ -597,8 +552,7 @@ UART1_Status_t UART1_Write(
         return UART1_ERROR_PARAM;
     }
 
-    /*
-     * Queue de trong 1 o.
+    /* Queue de trong 1 o.
      * Block don lon nhat = size - 1.
      */
     if (length >= UART1_TX_BUFFER_SIZE)
@@ -607,65 +561,44 @@ UART1_Status_t UART1_Write(
         return UART1_ERROR_PARAM;
     }
 
-    /*
-     * Critical section ngan:
-     * tranh DMA ISR doi tx_tail trong luc tinh free space
-     * va publish head.
+    /* Critical section ngan:
+     * tranh DMA ISR doi tx_tail trong luc tinh free space va publish head.
      */
     primask = __get_PRIMASK();
     __disable_irq();
 
     free_space = UART1_TxFreeSpace();
-
     if (length > free_space)
     {
-        if (primask == 0u)
-        {
-            __enable_irq();
-        }
-
-        /*
-         * BUSY la flow-control, khong phai sticky error.
-         */
+        __set_PRIMASK(primask);
+        // BUSY la flow-control, khong phai sticky error.
         return UART1_BUSY;
     }
 
-    /*
-     * Copy TOAN BO block vao queue.
-     */
+    // Copy TOAN BO block vao queue.
     local_head = uart1_tx_head;
 
     for (i = 0u; i < length; i++)
     {
-        uart1_tx_buffer[local_head] =
-            data[i];
-
-        local_head =
-            UART1_TxNextIndex(local_head);
+        uart1_tx_buffer[local_head] = data[i];
+        local_head = UART1_TxNextIndex(local_head);
     }
-
-    /*
-     * Publish head sau khi block da copy xong.
-     */
+		//Dam bao data da ghi xong vao queue truoc khi publish head moi.
+    __DMB();
+    // Publish head sau khi block da copy xong.
     uart1_tx_head = local_head;
 
-    /*
-     * Neu DMA ranh -> start ngay.
+    /* Neu DMA ranh -> start ngay.
      * Neu DMA dang chay -> TC ISR se start chunk sau.
      */
     UART1_TxStartNextDMA();
-
-    if (primask == 0u)
-    {
-        __enable_irq();
-    }
+    __set_PRIMASK(primask);
 
     return UART1_OK;
 }
 
-
 /* ============================================================================
- * 11. READ
+ * READ
  * ============================================================================
  */
 
@@ -683,111 +616,104 @@ uint16_t UART1_Read(
     uint32_t available;
     uint16_t count;
     uint16_t i;
+    uint8_t attempt;
 
     if (uart1_initialized == 0u)
     {
-        uart1_status =
-            UART1_ERROR_NOT_INITIALIZED;
-
+        uart1_status = UART1_ERROR_NOT_INITIALIZED;
         return 0u;
     }
-
     if ((dst == 0) || (capacity == 0u))
     {
         uart1_status = UART1_ERROR_PARAM;
         return 0u;
     }
 
-    /*
-     * Snapshot nhat quan.
-     *
+    /* Snapshot nhat quan.
      * DMA phan cung van chay khi CPU tam khoa interrupt.
      */
     primask = __get_PRIMASK();
     __disable_irq();
+		
+		write_total = uart1_rx_read_total;
 
-    /*
-     * Neu HT/TC flag da set ma ISR chua kip chay,
-     * service ngay de counter khong bi cham mot moc.
-     */
-    UART1_RxServicePendingFlags(0u);
-
-    completed =
-        uart1_rx_completed_bytes;
-
-    ndtr =
-        DMA1_Channel5->CNDTR;
-
-    /*
-     * So byte DMA da ghi trong vong hien tai.
-     */
-    position =
-        UART1_RX_DMA_BUFFER_SIZE - ndtr;
-
-    /*
-     * Moc vi tri tuong ung voi completed.
-     * Vi counter tang theo nua buffer,
-     * base_position thuong la 0 hoac half-buffer.
-     */
-    base_position =
-        completed % UART1_RX_DMA_BUFFER_SIZE;
-
-    /*
-     * Neu DMA chua cross them boundary sau luc service flag.
-     */
-    if (position >= base_position)
+    for (attempt = 0U; attempt < 4U; ++attempt)
     {
-        write_total =
-            completed +
-            (position - base_position);
-    }
-    else
-    {
+        UART1_RxServicePendingFlags(0U);
+        /* DMA RX da gap Transfer Error. */
+        if (uart1_status == UART1_ERROR_DMA_RX)
+        {
+            break;
+        }
+
+        completed = uart1_rx_completed_bytes;
+        ndtr = DMA1_Channel5->CNDTR;
+
         /*
-         * DMA vua cross boundary trong vai lenh critical section.
-         * Cong them phan con lai toi cuoi buffer + position moi.
+         * CNDTR giam tu BUFFER_SIZE -> 0.
+         * position la vi tri DMA hien tai trong mot vong buffer.
+         * Phep modulo xu ly ca thoi diem CNDTR tam thoi bang 0
+         * tai moc circular reload.
          */
-        write_total =
-            completed +
-            (UART1_RX_DMA_BUFFER_SIZE - base_position) +
-            position;
+        position = (UART1_RX_DMA_BUFFER_SIZE - ndtr)
+										% UART1_RX_DMA_BUFFER_SIZE;
+
+        /* Vi completed tang theo nua buffer,
+         * base_position chi nam tai cac moc HT/TC.
+         */
+        base_position = completed % UART1_RX_DMA_BUFFER_SIZE;
+
+        // So byte DMA da di tiep ke tu moc completed gan nhat.
+        available = (position + UART1_RX_DMA_BUFFER_SIZE - base_position)
+										% UART1_RX_DMA_BUFFER_SIZE;
+
+        /* Neu flag HT/TC/TE lai xuat hien sau luc service,
+         * hoac position cho thay DMA da cross them >= nua buffer,
+         * snapshot hien tai khong con nhat quan -> thu lai.
+         */
+        if ((DMA1->ISR &
+             (DMA_ISR_HTIF5 | DMA_ISR_TCIF5 | DMA_ISR_TEIF5)) != 0U)
+        {
+            continue;
+        }
+        if (available >= (UART1_RX_DMA_BUFFER_SIZE / 2U))
+        {
+            continue;
+        }
+        write_total = completed + available;
+        break;
     }
 
-    if (primask == 0u)
+    if (attempt == 4U)
     {
-        __enable_irq();
+        uart1_status = UART1_ERROR_RX_OVERFLOW;
     }
+    __set_PRIMASK(primask);
+		
+    // Neu DMA RX bi Transfer Error thi khong tra du lieu moi.
+    if (uart1_status == UART1_ERROR_DMA_RX)
+    {
+        return 0U;
+    }
+    // So byte DMA da ghi nhung main chua doc.
+    available = write_total - uart1_rx_read_total;
 
     /*
-     * Byte chua tra cho main.
-     */
-    available =
-        write_total - uart1_rx_read_total;
-
-    /*
-     * DMA da ghi de data cu.
+     * Neu available > RX buffer size:
+     * DMA da quay vong va ghi de data cu.
      */
     if (available > UART1_RX_DMA_BUFFER_SIZE)
     {
-        uart1_status =
-            UART1_ERROR_RX_OVERFLOW;
-
-        /*
-         * Chi con giu duoc 1 buffer moi nhat.
-         */
-        uart1_rx_read_total =
-            write_total -
-            UART1_RX_DMA_BUFFER_SIZE;
-
-        available =
-            UART1_RX_DMA_BUFFER_SIZE;
+        uart1_status = UART1_ERROR_RX_OVERFLOW;
+			
+        // Du lieu cu da mat. Chi con giu duoc mot buffer moi nhat.
+        uart1_rx_read_total = write_total - UART1_RX_DMA_BUFFER_SIZE;
+        available = UART1_RX_DMA_BUFFER_SIZE;
     }
-
-    if (available == 0u)
+    if (available == 0U)
     {
-        return 0u;
+        return 0U;
     }
-
     if (available > capacity)
     {
         count = capacity;
@@ -797,29 +723,22 @@ uint16_t UART1_Read(
         count = (uint16_t)available;
     }
 
-    /*
-     * Copy data tu DMA circular buffer sang dst cua main.
-     */
-    for (i = 0u; i < count; i++)
+    // Dam bao CPU doc RX buffer sau khi da snapshot state DMA.
+    __DMB();
+
+    /* Copy data tu DMA circular buffer sang dst cua main. */
+    for (i = 0U; i < count; i++)
     {
         uint32_t index;
-
-        index =
-            (uart1_rx_read_total + i)
-            % UART1_RX_DMA_BUFFER_SIZE;
-
-        dst[i] =
-            uart1_rx_dma_buffer[index];
+        index = (uart1_rx_read_total + i) % UART1_RX_DMA_BUFFER_SIZE;
+        dst[i] = uart1_rx_dma_buffer[index];
     }
-
     uart1_rx_read_total += count;
-
     return count;
 }
 
-
 /* ============================================================================
- * 12. STATUS
+ * STATUS
  * ============================================================================
  */
 
@@ -827,18 +746,14 @@ uint8_t UART1_IsTxIdle(void)
 {
     uint32_t primask;
     uint8_t idle;
-
     if (uart1_initialized == 0u)
     {
         return 0u;
     }
-
     primask = __get_PRIMASK();
     __disable_irq();
 
-    /*
-     * Idle = queue rong + DMA ranh + USART TC.
-     */
+    // Idle = queue rong + DMA ranh + USART TC.
     if ((uart1_tx_head == uart1_tx_tail) &&
         (uart1_tx_dma_active == 0u) &&
         ((USART1->SR & USART_SR_TC) != 0u))
@@ -849,12 +764,7 @@ uint8_t UART1_IsTxIdle(void)
     {
         idle = 0u;
     }
-
-    if (primask == 0u)
-    {
-        __enable_irq();
-    }
-
+		__set_PRIMASK(primask);
     return idle;
 }
 
@@ -874,51 +784,45 @@ uint32_t UART1_GetHwErrorFlags(void)
 void UART1_ClearStatus(void)
 {
     uint32_t primask;
-
     primask = __get_PRIMASK();
     __disable_irq();
 
     if (uart1_initialized != 0u)
     {
-        uart1_status =
-            UART1_OK;
-
-        uart1_hw_error_flags =
-            UART1_HWERR_NONE;
+        uart1_status = UART1_OK;
+        uart1_hw_error_flags = UART1_HWERR_NONE;
     }
     else
     {
-        uart1_status =
-            UART1_ERROR_NOT_INITIALIZED;
+        uart1_status = UART1_ERROR_NOT_INITIALIZED;
     }
-
-    if (primask == 0u)
-    {
-        __enable_irq();
-    }
+		__set_PRIMASK(primask);
 }
 
 
 /* ============================================================================
- * 13. DMA1 CHANNEL 4 IRQ - TX
+ * DMA1 CHANNEL 4 IRQ - TX
  * ============================================================================
  */
 
 void UART1_DMA_TX_IRQHandler(void)
 {
     uint32_t isr;
-
+		// Bao ve truong hop IRQ bat ngo xay ra truoc khi Init hoan tat.
+    if (uart1_initialized == 0U)
+    {
+        NVIC_DisableIRQ(DMA1_Channel4_IRQn);
+        return;
+    }
+		
     isr = DMA1->ISR;
-
     /*
      * DMA TX error.
      */
     if ((isr & DMA_ISR_TEIF4) != 0u)
     {
         DMA1->IFCR = DMA_IFCR_CGIF4;
-
-        DMA1_Channel4->CCR &=
-            ~DMA_CCR_EN;
+        DMA1_Channel4->CCR &= ~DMA_CCR_EN;
 
         uart1_tx_dma_active = 0u;
         uart1_tx_dma_chunk_len = 0u;
@@ -929,58 +833,34 @@ void UART1_DMA_TX_IRQHandler(void)
          * da ra ngoai, nen huy phan TX queue con lai de tranh
          * driver tu dong gui lai va gay duplicate.
          */
-        uart1_tx_tail =
-            uart1_tx_head;
-
-        USART1->CR1 &=
-            ~USART_CR1_TCIE;
-
-        uart1_status =
-            UART1_ERROR_DMA_TX;
-
-        UART1_ErrorCallback(
-            UART1_ERROR_DMA_TX
-        );
-
+        uart1_tx_tail = uart1_tx_head;
+        USART1->CR1 &= ~USART_CR1_TCIE;
+        uart1_status = UART1_ERROR_DMA_TX;
+        UART1_ErrorCallback(UART1_ERROR_DMA_TX);
+			
         return;
     }
 
-    /*
-     * DMA da chuyen xong chunk hien tai vao USART1.
-     */
+    // DMA da chuyen xong chunk hien tai vao USART1.
     if ((isr & DMA_ISR_TCIF4) != 0u)
     {
         uint16_t new_tail;
-
-        DMA1->IFCR =
-            DMA_IFCR_CTCIF4;
-
-        DMA1_Channel4->CCR &=
-            ~DMA_CCR_EN;
-
-        new_tail =
-            (uint16_t)(
-                uart1_tx_tail +
-                uart1_tx_dma_chunk_len
-            );
+        DMA1->IFCR = DMA_IFCR_CTCIF4;
+        DMA1_Channel4->CCR &= ~DMA_CCR_EN;
+			
+        new_tail = (uint16_t)(
+                uart1_tx_tail + uart1_tx_dma_chunk_len);
 
         if (new_tail >= UART1_TX_BUFFER_SIZE)
         {
-            new_tail =
-                (uint16_t)(
-                    new_tail -
-                    UART1_TX_BUFFER_SIZE
-                );
+            new_tail = (uint16_t)(
+                    new_tail - UART1_TX_BUFFER_SIZE);
         }
-
-        uart1_tx_tail =
-            new_tail;
-
+        uart1_tx_tail = new_tail;
         uart1_tx_dma_chunk_len = 0u;
         uart1_tx_dma_active = 0u;
 
-        /*
-         * Queue con data -> start chunk tiep.
+        /* Queue con data -> start chunk tiep.
          * Queue rong -> start helper se bat TCIE.
          */
         UART1_TxStartNextDMA();
@@ -989,23 +869,25 @@ void UART1_DMA_TX_IRQHandler(void)
 
 
 /* ============================================================================
- * 14. DMA1 CHANNEL 5 IRQ - RX
+ * DMA1 CHANNEL 5 IRQ - RX
  * ============================================================================
  */
 
 void UART1_DMA_RX_IRQHandler(void)
 {
+		// Bao ve truong hop IRQ bat ngo xay ra truoc khi Init hoan tat.
+    if (uart1_initialized == 0U)
+    {
+        NVIC_DisableIRQ(DMA1_Channel5_IRQn);
+        return;
+    }
     UART1_RxServicePendingFlags(1u);
 }
 
 
 /* ============================================================================
- * 15. USART1 IRQ
+ * USART1 IRQ
  * ============================================================================
- *
- * Khong dung RXNE/TXE de move data.
- * Data do DMA xu ly.
- *
  * USART IRQ chi xu ly:
  *   - PE/FE/NE/ORE
  *   - TC cua byte TX cuoi
@@ -1014,11 +896,15 @@ void UART1_DMA_RX_IRQHandler(void)
 void UART1_IRQHandler(void)
 {
     uint32_t sr;
-
+		// Bao ve truong hop IRQ bat ngo xay ra truoc khi Init hoan tat.
+    if (uart1_initialized == 0U)
+    {
+        NVIC_DisableIRQ(USART1_IRQn);
+        return;
+    }
     sr = USART1->SR;
-
-    /*
-     * ------------------------------------------------------------
+	
+    /* ------------------------------------------------------------
      * Hardware error
      * ------------------------------------------------------------
      */
@@ -1031,30 +917,24 @@ void UART1_IRQHandler(void)
 
         if ((sr & USART_SR_PE) != 0u)
         {
-            uart1_hw_error_flags |=
-                UART1_HWERR_PE;
+            uart1_hw_error_flags |= UART1_HWERR_PE;
         }
 
         if ((sr & USART_SR_FE) != 0u)
         {
-            uart1_hw_error_flags |=
-                UART1_HWERR_FE;
+            uart1_hw_error_flags |= UART1_HWERR_FE;
         }
 
         if ((sr & USART_SR_NE) != 0u)
         {
-            uart1_hw_error_flags |=
-                UART1_HWERR_NE;
+            uart1_hw_error_flags |= UART1_HWERR_NE;
         }
 
         if ((sr & USART_SR_ORE) != 0u)
         {
-            uart1_hw_error_flags |=
-                UART1_HWERR_ORE;
+            uart1_hw_error_flags |= UART1_HWERR_ORE;
         }
-
-        uart1_status =
-            UART1_ERROR_HW;
+        uart1_status = UART1_ERROR_HW;
 
         /*
          * STM32F1 clear PE/FE/NE/ORE bang sequence:
@@ -1063,21 +943,15 @@ void UART1_IRQHandler(void)
         dummy = USART1->DR;
         (void)dummy;
 
-        UART1_ErrorCallback(
-            UART1_ERROR_HW
-        );
+        UART1_ErrorCallback(UART1_ERROR_HW);
     }
 
     /*
      * ------------------------------------------------------------
      * Transmission Complete
      * ------------------------------------------------------------
-     *
-     * DMA TC:
-     *   byte cuoi da vao USART.
-     *
-     * USART TC:
-     *   byte cuoi da ra het shift register / PA9.
+     * DMA TC: byte cuoi da vao USART.
+     * USART TC: byte cuoi da ra het shift register / PA9.
      */
     if (((sr & USART_SR_TC) != 0u) &&
         ((USART1->CR1 & USART_CR1_TCIE) != 0u))
@@ -1086,48 +960,27 @@ void UART1_IRQHandler(void)
          * Tat TC interrupt.
          * Khong RMW USART_SR de clear TC.
          */
-        USART1->CR1 &=
-            ~USART_CR1_TCIE;
-
+        USART1->CR1 &= ~USART_CR1_TCIE;
         uart1_tx_waiting_tc = 0u;
 
-        /*
-         * Callback chi khi TX thuc su rong.
-         */
-        if ((uart1_tx_head == uart1_tx_tail) &&
-            (uart1_tx_dma_active == 0u))
+        // Callback chi khi TX thuc su rong.
+        if ((uart1_tx_head == uart1_tx_tail) && (uart1_tx_dma_active == 0u))
         {
             UART1_TxCompleteCallback();
         }
     }
 }
 
-
 /* ============================================================================
- * 16. WEAK CALLBACK
+ * WEAK CALLBACK
  * ============================================================================
  */
 
 __WEAK void UART1_TxCompleteCallback(void)
-{
-    /*
-     * Application co the override trong main.c.
-     *
-     * Vi du:
-     *   uart_tx_complete_count++;
-     */
+{   
 }
 
-
-__WEAK void UART1_ErrorCallback(
-    UART1_Status_t error
-)
+__WEAK void UART1_ErrorCallback(UART1_Status_t error)
 {
-    /*
-     * Application co the override trong main.c.
-     *
-     * Vi du:
-     *   uart_last_error = error;
-     */
     (void)error;
 }

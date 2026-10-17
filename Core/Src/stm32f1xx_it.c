@@ -22,6 +22,7 @@
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "UART.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -213,5 +214,19 @@ void USB_LP_CAN1_RX0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void DMA1_Channel4_IRQHandler(void)
+{
+    UART1_DMA_TX_IRQHandler();
+}
+
+void DMA1_Channel5_IRQHandler(void)
+{
+    UART1_DMA_RX_IRQHandler();
+}
+
+void USART1_IRQHandler(void)
+{
+    UART1_IRQHandler();
+}
 
 /* USER CODE END 1 */

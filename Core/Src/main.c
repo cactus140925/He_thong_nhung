@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "usb_cdc_app.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,7 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define TRNG_TEST_MODE    1
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,86 +45,20 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static uint8_t trng_active = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-#if TRNG_TEST_MODE
-static void TRNG_TestGenerate(const TRNG_Config_t *config);
-#endif
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#if TRNG_TEST_MODE
-
-static void TRNG_TestGenerate(const TRNG_Config_t *config)
-{
-    uint8_t random_data[16];
-
-    uint16_t bytes;
-    uint16_t i;
-
-    uint32_t state;
-    uint32_t start_time;
-    uint32_t elapsed;
-
-
-    if (config == NULL)
-    {
-        return;
-    }
-
-
-    bytes = config->random_size / 8;
-
-
-    if ((bytes == 0) || (bytes > sizeof(random_data)))
-    {
-        USB_CDC_SendString(
-            "ERROR:INVALID_RANDOM_SIZE\r\n"
-        );
-
-        return;
-    }
-
-
-    start_time = HAL_GetTick();
-
-
-    
-    state = HAL_GetTick() ^ 0xA5A55A5AU;
-
-
-    for (i = 0; i < bytes; i++)
-    {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-
-        random_data[i] =
-            (uint8_t)(state & 0xFF);
-    }
-
-
-    elapsed =
-        HAL_GetTick() - start_time;
-
-
-    USB_CDC_SendRandomResult(
-        random_data,
-        config->random_size,
-        elapsed,
-        config->sample_count
-    );
-}
-
-#endif
-
 /* USER CODE END 0 */
+
 /**
   * @brief  The application entry point.
   * @retval int
@@ -132,9 +67,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-CDC_Event_t event;
 
-const TRNG_Config_t *config;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -155,63 +88,23 @@ const TRNG_Config_t *config;
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  USB_CDC_App_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-  USB_CDC_App_Init();
 
-HAL_Delay(1000);
-
-USB_CDC_SendString(
-    "STM32_TRNG_READY\r\n"
-);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-while (1)
-{
+  while (1)
+  {
     USB_CDC_App_Task();
+    /* USER CODE END WHILE */
 
-    event = USB_CDC_GetEvent();
-
-    if (event == CDC_EVENT_START)
-    {
-        trng_active = 1;
-
-        config = USB_CDC_GetConfig();
-
-       
-        (void)config;
-    }
-    else if (event == CDC_EVENT_STOP)
-    {
-        trng_active = 0;
-
-       
-    }
-    else if (event == CDC_EVENT_GET_RANDOM)
-    {
-        config = USB_CDC_GetConfig();
-
-        if (trng_active)
-        {
-#if TRNG_TEST_MODE
-
-            TRNG_TestGenerate(config);
-
-#else
-
-            
-
-#endif
-        }
-    }
-
-  /* USER CODE END WHILE */
-
-  /* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
 }
-/* USER CODE END 3 */
 
 /**
   * @brief System Clock Configuration

@@ -30,11 +30,12 @@ extern "C" {
 
 /* SMPR encoding: 0=1.5, 1=7.5, 2=13.5, 3=28.5, 4=41.5,
  * 5=55.5, 6=71.5, 7=239.5 ADC clock cycles.
- * With the default and ADCCLK=12 MHz, one conversion takes 21 us.
- * A Timer trigger period MUST exceed the ADC conversion time.
+ * Default 6: with ADCCLK=12 MHz, conversion takes (71.5+12.5)/12=7 us.
+ * Allow regular-trigger latency (2 ADC clocks + 1 PCLK2) as well.
+ * Check source settling/impedance when reducing the sampling time.
  */
 #ifndef ADC_SAMPLE_TIME_BITS
-#define ADC_SAMPLE_TIME_BITS 7U
+#define ADC_SAMPLE_TIME_BITS 6U
 #endif
 
 #ifndef ADC_DMA_IRQ_PRIORITY

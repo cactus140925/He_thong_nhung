@@ -22,7 +22,8 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-
+#include <string.h>
+#include "usb_cdc_app.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,6 +96,16 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
 
+#define CDC_RX_RING_SIZE 256
+
+static uint8_t cdc_rx_ring[CDC_RX_RING_SIZE];
+
+static volatile uint16_t cdc_rx_head = 0;
+static volatile uint16_t cdc_rx_tail = 0;
+
+volatile uint8_t cdc_rx_overflow = 0;
+static uint8_t cdc_line_coding[7] = {0x00U, 0xC2U, 0x01U, 0x00U, 0U, 0U, 8U};
+
 /* USER CODE END PRIVATE_VARIABLES */
 
 /**
@@ -150,6 +161,9 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_FS =
 static int8_t CDC_Init_FS(void)
 {
   /* USER CODE BEGIN 3 */
+  cdc_rx_head = cdc_rx_tail = 0U;
+  cdc_rx_overflow = 0U;
+  USB_CDC_OnLinkReset();
   /* Set Application Buffers */
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
@@ -164,6 +178,9 @@ static int8_t CDC_Init_FS(void)
 static int8_t CDC_DeInit_FS(void)
 {
   /* USER CODE BEGIN 4 */
+  cdc_rx_head = cdc_rx_tail = 0U;
+  cdc_rx_overflow = 0U;
+  USB_CDC_OnLinkReset();
   return (USBD_OK);
   /* USER CODE END 4 */
 }
@@ -218,11 +235,11 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
   /* 6      | bDataBits  |   1   | Number Data bits (5, 6, 7, 8 or 16).          */
   /*******************************************************************************/
     case CDC_SET_LINE_CODING:
-
+      if (length == sizeof(cdc_line_coding)) memcpy(cdc_line_coding, pbuf, sizeof(cdc_line_coding));
     break;
 
     case CDC_GET_LINE_CODING:
-
+      if (length == sizeof(cdc_line_coding)) memcpy(pbuf, cdc_line_coding, sizeof(cdc_line_coding));
     break;
 
     case CDC_SET_CONTROL_LINE_STATE:
@@ -259,9 +276,37 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
+
+  uint32_t i;
+
+  for (i = 0; i < *Len; i++)
+  {
+    uint16_t next =
+        (uint16_t)((cdc_rx_head + 1) % CDC_RX_RING_SIZE);
+
+    if (next != cdc_rx_tail)
+    {
+      cdc_rx_ring[cdc_rx_head] = Buf[i];
+      __DMB();
+      cdc_rx_head = next;
+    }
+    else
+    {
+      /* RX buffer full */
+      cdc_rx_overflow = 1;
+      break;
+    }
+  }
+
+  /*
+   * Re-arm USB OUT endpoint
+   * d? ti?p t?c nh?n d? li?u t? PC.
+   */
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  return (USBD_OK);
+
+  return USBD_OK;
+
   /* USER CODE END 6 */
 }
 
@@ -279,18 +324,79 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
+
   /* USER CODE BEGIN 7 */
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
-  if (hcdc->TxState != 0){
-    return USBD_BUSY;
+
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
+  {
+      return USBD_FAIL;
   }
-  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
-  result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+
+  if (hUsbDeviceFS.pClassData == NULL)
+  {
+      return USBD_FAIL;
+  }
+
+  USBD_CDC_HandleTypeDef *hcdc =
+      (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+
+  if (hcdc->TxState != 0)
+  {
+      return USBD_BUSY;
+  }
+
+  USBD_CDC_SetTxBuffer(
+      &hUsbDeviceFS,
+      Buf,
+      Len
+  );
+
+  result =
+      USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+
   /* USER CODE END 7 */
+
   return result;
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+
+uint16_t USB_CDC_Read(uint8_t *buffer, uint16_t max_len)
+{
+    uint16_t count = 0;
+    uint32_t mask;
+    if (buffer == NULL) return 0U;
+    mask = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+
+    while ((cdc_rx_tail != cdc_rx_head) &&
+           (count < max_len))
+    {
+        buffer[count++] = cdc_rx_ring[cdc_rx_tail];
+
+        cdc_rx_tail =
+            (uint16_t)((cdc_rx_tail + 1) % CDC_RX_RING_SIZE);
+    }
+
+    __DMB();
+    __set_PRIMASK(mask);
+    return count;
+}
+
+uint8_t USB_CDC_RxOverflow(void)
+{
+    uint8_t state;
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    state = cdc_rx_overflow;
+
+    cdc_rx_overflow = 0;
+    __DMB();
+    __set_PRIMASK(mask);
+    return state;
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 

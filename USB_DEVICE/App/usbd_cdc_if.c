@@ -104,6 +104,9 @@ static volatile uint16_t cdc_rx_head = 0;
 static volatile uint16_t cdc_rx_tail = 0;
 
 volatile uint8_t cdc_rx_overflow = 0;
+/* OUT endpoint left NAKing until the ring has room for one full packet.
+ * The host then simply waits; bulk POST_BIN payloads never overflow RX. */
+static volatile uint8_t cdc_rx_paused = 0;
 static uint8_t cdc_line_coding[7] = {0x00U, 0xC2U, 0x01U, 0x00U, 0U, 0U, 8U};
 
 /* USER CODE END PRIVATE_VARIABLES */
@@ -162,7 +165,7 @@ static int8_t CDC_Init_FS(void)
 {
   /* USER CODE BEGIN 3 */
   cdc_rx_head = cdc_rx_tail = 0U;
-  cdc_rx_overflow = 0U;
+  cdc_rx_overflow = 0U; cdc_rx_paused = 0U;
   USB_CDC_OnLinkReset();
   /* Set Application Buffers */
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
@@ -179,7 +182,7 @@ static int8_t CDC_DeInit_FS(void)
 {
   /* USER CODE BEGIN 4 */
   cdc_rx_head = cdc_rx_tail = 0U;
-  cdc_rx_overflow = 0U;
+  cdc_rx_overflow = 0U; cdc_rx_paused = 0U;
   USB_CDC_OnLinkReset();
   return (USBD_OK);
   /* USER CODE END 4 */
@@ -299,11 +302,15 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
   }
 
   /*
-   * Re-arm USB OUT endpoint
-   * d? ti?p t?c nh?n d? li?u t? PC.
+   * Re-arm USB OUT endpoint only while one more full packet fits; otherwise
+   * NAK until USB_CDC_Read frees space (flow control, no dropped bytes).
    */
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
-  USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+  if ((uint16_t)((cdc_rx_tail + CDC_RX_RING_SIZE - cdc_rx_head - 1U) % CDC_RX_RING_SIZE) >=
+      CDC_DATA_FS_MAX_PACKET_SIZE)
+    USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+  else
+    cdc_rx_paused = 1U;
 
   return USBD_OK;
 
@@ -377,6 +384,15 @@ uint16_t USB_CDC_Read(uint8_t *buffer, uint16_t max_len)
 
         cdc_rx_tail =
             (uint16_t)((cdc_rx_tail + 1) % CDC_RX_RING_SIZE);
+    }
+
+    if (cdc_rx_paused &&
+        (uint16_t)((cdc_rx_tail + CDC_RX_RING_SIZE - cdc_rx_head - 1U) % CDC_RX_RING_SIZE) >=
+            CDC_DATA_FS_MAX_PACKET_SIZE &&
+        hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED && hUsbDeviceFS.pClassData != NULL)
+    {
+        cdc_rx_paused = 0U;
+        USBD_CDC_ReceivePacket(&hUsbDeviceFS);
     }
 
     __DMB();

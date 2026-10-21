@@ -76,6 +76,13 @@ typedef enum
  */
 ADC_Status_t ADC_Init(uint8_t channel);
 
+/* Adjust the sampling aperture ONLY while the timer/DMA are stopped.
+ * Runtime selection allows 100/150/200 kHz without compromising slow-mode
+ * settling. SMPR encoding: 3=28.5, 4=41.5, 5=55.5, 6=71.5.
+ * This sets the next ADC_ConfigureChannel(), including ADC_StartDMA(). */
+ADC_Status_t ADC_SetSampleTimeBits(uint8_t bits);
+uint8_t ADC_GetSampleTimeBits(void);
+
 /* Single software-triggered conversions for testing, while DMA is idle.
  * Result is written only on ADC_OK; range 0..4095.
  * A polling/calibration timeout requires ADC_Init() before retrying.

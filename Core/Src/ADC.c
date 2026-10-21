@@ -18,6 +18,7 @@
 #define ADC_SOFTWARE_TRIGGER (ADC_CR2_EXTSEL | ADC_CR2_EXTTRIG)
 
 static uint8_t adc_initialized;
+static uint8_t adc_sample_time_bits = ADC_SAMPLE_TIME_BITS;
 static uint8_t adc_default_channel = ADC_CH_PA0;
 static volatile uint8_t dma_running;
 static volatile uint8_t dma_pending; /* Bit 0: first half; bit 1: second half. */
@@ -81,7 +82,7 @@ static void ADC_ConfigureChannel(uint8_t channel)
         GPIOB->CRL &= ~(0xFUL << (((uint32_t)channel - 8U) * 4U));
     }
     ADC1->SMPR2 = (ADC1->SMPR2 & ~(0x7UL << shift)) |
-                  ((uint32_t)ADC_SAMPLE_TIME_BITS << shift);
+                  ((uint32_t)adc_sample_time_bits << shift);
     ADC1->SQR3 = (ADC1->SQR3 & ~ADC_SQR3_SQ1) | (uint32_t)channel;
 }
 
@@ -167,6 +168,17 @@ ADC_Status_t ADC_Init(uint8_t channel)
     dma_status = ADC_OK;
     return ADC_OK;
 }
+
+ADC_Status_t ADC_SetSampleTimeBits(uint8_t bits)
+{
+    if (bits > 7U) return ADC_ERROR_PARAM;
+    if (adc_initialized == 0U) return ADC_ERROR_NOT_INITIALIZED;
+    if ((dma_running != 0U) || (dma_pending != 0U)) return ADC_ERROR_BUSY;
+    /* No conversion is in progress: caller also keeps TIM3 stopped. */
+    adc_sample_time_bits = bits;
+    return ADC_OK;
+}
+uint8_t ADC_GetSampleTimeBits(void) { return adc_sample_time_bits; }
 
 ADC_Status_t ADC_Read(uint16_t *value)
 {
